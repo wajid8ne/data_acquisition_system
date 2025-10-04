@@ -1,0 +1,66 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include "DHT.h"
+
+#define DHTPIN 4
+#define DHTTYPE DHT11
+DHT dht(DHTPIN, DHTTYPE);
+
+// --- Car MAC ---
+uint8_t carAddress[6] = {0x78, 0x1C, 0x3C, 0xA6, 0x2C, 0x24};
+
+// --- DHT Data struct ---
+typedef struct {
+  float temperature;
+  float humidity;
+} DHTData;
+
+// --- Callback: when Car pings Node ---
+void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+  int rssi = recv_info->rx_ctrl->rssi;  // RSSI of the Car
+  Serial.printf("[NODE] Ping received | RSSI=%d dBm\n", rssi);
+
+  if (rssi >= -45) { // Only send if Car is close
+    float t = dht.readTemperature();
+    float h = dht.readHumidity();
+    if (!isnan(t) && !isnan(h)) {
+      DHTData d = {t, h};
+      esp_err_t res = esp_now_send(recv_info->src_addr, (uint8_t*)&d, sizeof(d));
+      if (res == ESP_OK)
+        Serial.printf("[NODE] Sent: T=%.1f°C H=%.1f%%\n", t, h);
+      else
+        Serial.printf("[NODE] Send failed: %d\n", res);
+    } else {
+      Serial.println("[NODE] DHT read failed");
+    }
+  } else {
+    Serial.println("[NODE] Car too far, not sending");
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+  dht.begin();
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
+    while (true) delay(1000);
+  }
+
+  // Add Car peer
+  esp_now_peer_info_t peerInfo = {};
+  memcpy(peerInfo.peer_addr, carAddress, 6);
+  peerInfo.channel = 0;
+  peerInfo.encrypt = false;
+  esp_now_add_peer(&peerInfo);
+
+  esp_now_register_recv_cb(onDataRecv);
+
+  Serial.println("[NODE] Ready: waiting for Car ping...");
+}
+
+void loop() {
+  // Nothing needed here; Node responds to Car automatically
+  delay(10);
+}
