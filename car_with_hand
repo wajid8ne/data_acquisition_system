@@ -1,0 +1,101 @@
+#include <WiFi.h>
+#include <esp_now.h>
+#include <SD.h>
+#include <SPI.h>
+
+#define SD_CS 5
+
+uint8_t nodeAddress[6] = {0x6C, 0xC8, 0x40, 0x35, 0x46, 0xCC};
+uint8_t baseAddress[6] = {0x3C, 0x8A, 0x1F, 0x50, 0xAA, 0x0C};
+
+typedef struct {
+  float temperature;
+  float humidity;
+} DHTData;
+
+unsigned long lastPingMs = 0;
+const unsigned long PING_INTERVAL = 1000;
+
+// --- Receive callback ---
+void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+  String strData;
+  if (len == sizeof(DHTData)) {
+    DHTData d;
+    memcpy(&d, data, sizeof(DHTData));
+    strData = "T=" + String(d.temperature) + "°C, H=" + String(d.humidity) + "%, RSSI=" + String(recv_info->rx_ctrl->rssi);
+    Serial.println("[CAR] Data from Node: " + strData);
+  } else {
+    strData = String((char*)data).substring(0, len);
+    // This is a beacon from Base
+    int rssi = recv_info->rx_ctrl->rssi;
+    if (rssi > -40) {
+      // Base is very close → dump SD log
+      File file = SD.open("/datalog.txt", FILE_READ);
+      if (file) {
+        Serial.println("[CAR] Dumping data to Base...");
+        while (file.available()) {
+          String line = file.readStringUntil('\n');
+          esp_now_send(baseAddress, (uint8_t*)line.c_str(), line.length());
+          delay(50);
+        }
+        file.close();
+        SD.remove("/datalog.txt");
+        Serial.println("[CAR] Dump complete!");
+      }
+    }
+  }
+
+  // Save Node data to SD
+  if (len == sizeof(DHTData) && SD.begin(SD_CS)) {
+    File file = SD.open("/datalog.txt", FILE_APPEND);
+    if (file) {
+      file.println(strData);
+      file.close();
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  // Init SD
+  if (SD.begin(SD_CS)) Serial.println("[CAR] SD initialized");
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("[CAR] ESP-NOW init failed");
+    while (true) delay(1000);
+  }
+
+  // Add Node peer
+  esp_now_peer_info_t nodePeer = {};
+  memcpy(nodePeer.peer_addr, nodeAddress, 6);
+  nodePeer.channel = 0;
+  nodePeer.encrypt = false;
+  esp_now_add_peer(&nodePeer);
+
+  // Add Base peer
+  esp_now_peer_info_t basePeer = {};
+  memcpy(basePeer.peer_addr, baseAddress, 6);
+  basePeer.channel = 0;
+  basePeer.encrypt = false;
+  esp_now_add_peer(&basePeer);
+
+  // Register receive callback
+  esp_now_register_recv_cb(onDataRecv);
+
+  Serial.println("[CAR] Ready: pinging Node and waiting for Base beacon");
+}
+
+void loop() {
+  unsigned long now = millis();
+
+  // Ping Node
+  if (now - lastPingMs >= PING_INTERVAL) {
+    lastPingMs = now;
+    const char *ping = "PING";
+    esp_now_send(nodeAddress, (uint8_t*)ping, strlen(ping));
+  }
+
+  delay(10);
+}
