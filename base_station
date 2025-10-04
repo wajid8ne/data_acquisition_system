@@ -1,0 +1,48 @@
+#include <WiFi.h>
+#include <esp_now.h>
+
+uint8_t carAddress[6] = {0x78, 0x1C, 0x3C, 0xA6, 0x2C, 0x24};
+unsigned long lastBeacon = 0;
+const unsigned long BEACON_INTERVAL = 1000; // 1s
+
+void onDataRecv(const esp_now_recv_info_t *recv_info, const uint8_t *data, int len) {
+  String msg;
+  for (int i = 0; i < len; i++) msg += (char)data[i];
+  msg.trim();
+
+  int rssi = recv_info->rx_ctrl->rssi;
+  Serial.printf("Received from Car | RSSI=%d dBm | %s\n", rssi, msg.c_str());
+}
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.mode(WIFI_STA);
+
+  if (esp_now_init() != ESP_OK) {
+    Serial.println("ESP-NOW init failed");
+    while (true) delay(1000);
+  }
+
+  // Register receive callback
+  esp_now_register_recv_cb(onDataRecv);
+
+  // Add Car peer for beacons and data
+  esp_now_peer_info_t peer = {};
+  memcpy(peer.peer_addr, carAddress, 6);
+  peer.channel = 0;
+  peer.encrypt = false;
+  esp_now_add_peer(&peer);
+
+  Serial.println("[BASE] Ready: sending beacons to Car every 1s");
+}
+
+void loop() {
+  unsigned long now = millis();
+  if (now - lastBeacon > BEACON_INTERVAL) {
+    lastBeacon = now;
+    const char *beacon = "BASE_BEACON";
+    esp_err_t res = esp_now_send(carAddress, (uint8_t*)beacon, strlen(beacon));
+    if (res != ESP_OK) Serial.println("[BASE] Beacon send failed");
+  }
+  delay(10);
+}
